@@ -34,8 +34,481 @@
 SPIClass touchscreenSPI(VSPI);
 XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
-#include "PvCommon.h"  // Frame v4, drawPvPage(...), pvMaxPages(), crc16_modbus, MCAST_GRP, MCAST_PORT
-#include "PvStats.h"   // bereits übernommen (enthält load_kWh in Payloads)
+// ---- Eingebettetes PvCommon (vorher separate Header) ----
+#define tagesAnzeige  1
+#define monatsAnzeige 2
+#define expPreis 0.138
+#define t1Preis 0.344
+#define t2Preis 0.2597
+
+// ================= Multicast (UDP) =================
+static const IPAddress MCAST_GRP(239, 12, 12, 12);
+static const uint16_t  MCAST_PORT = 55221;
+
+// ================= CRC16 (Modbus) =================
+static inline uint16_t crc16_modbus(const uint8_t* data, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else         crc >>= 1;
+    }
+  }
+  return crc;
+}
+
+// ------------------------- Frame V4 -------------------------
+#define PV_MAGIC   0xBEEF
+#define PV_VERSION 4
+
+typedef struct __attribute__((packed)) {
+  uint16_t magic;         // PV_MAGIC
+  uint8_t  version;       // PV_VERSION (=4)
+  uint32_t seq;           // laufende Nummer
+  uint32_t ts;            // UNIX time (s)
+
+  // Hauptwerte
+  int32_t  pvW;
+  int32_t  gridW;
+  int32_t  battW;
+  int32_t  loadW;
+
+  int16_t  temp10;        // 0.1°C
+  uint16_t socx10;        // 0.1%
+
+  float    pvTodayKWh;
+  float    gridExpToday;
+  float    gridImpToday;
+  float    loadTodayKWh;
+
+  int32_t  eta20s;        // Sekunden bis 20% (oder -1 wenn unbekannt)
+
+  // Zusatz (Skalen s. Namen)
+  int16_t  pv1Voltage_x10_V;
+  int16_t  pv1Current_x10_A;
+  int16_t  pv2Voltage_x10_V;
+  int16_t  pv2Current_x10_A;
+
+  int32_t  gridVoltageA_x10_V;
+  int32_t  gridVoltageB_x10_V;
+  int32_t  gridVoltageC_x10_V;
+
+  int32_t  gridCurrentA_x100_A;
+  int32_t  gridCurrentB_x100_A;
+  int32_t  gridCurrentC_x100_A;
+
+  uint16_t crc;           // CRC-16 (Modbus) über alles bis vor 'crc'
+} PvFrameV4;
+
+// ------------------------- Layout (CYD 320x240 landscape) -------------------------
+static constexpr int W=320, H=240;
+static constexpr int PAD_X=8, PAD_Y=6;
+static constexpr int STATUS_H=32;
+static constexpr int headerLineY=STATUS_H+2;
+static constexpr int startY = headerLineY + 6;
+
+// ------------------------- Optionale Provider-Hooks (weak) -------------------------
+#if defined(__GNUC__)
+extern bool pvGetTodaySplits(float& t1_kWh, float& t2_kWh) __attribute__((weak));
+extern bool pvGetTodayExport(float& exp_kWh) __attribute__((weak));
+extern bool pvGetTodayPV(float& pv_kWh)      __attribute__((weak));
+extern bool pvGetTodayLoad(float& load_kWh)  __attribute__((weak));
+#else
+extern bool pvGetTodaySplits(float& t1_kWh, float& t2_kWh);
+extern bool pvGetTodayExport(float& exp_kWh);
+extern bool pvGetTodayPV(float& pv_kWh);
+extern bool pvGetTodayLoad(float& load_kWh);
+#endif
+
+// ================= Sichtbare Anzeige-Funktionen ===================
+
+// Header
+static inline void drawStatusHeader(TFT_eSPI& tft, const PvFrameV4& f){
+  // lokale Lambdas
+  auto nowHHMM = []() -> String {
+    time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
+    char b[6]; snprintf(b,sizeof(b),"%02d:%02d",ti.tm_hour,ti.tm_min);
+    return String(b);
+  };
+  auto fmtETA = [](int32_t s)->String{
+    if(s<=0) return "--:--";
+    time_t now; time(&now); time_t eta = now + s;
+    struct tm ti; localtime_r(&eta,&ti);
+    char b[6]; snprintf(b,sizeof(b),"%02d:%02d",ti.tm_hour,ti.tm_min);
+    return String(b);
+  };
+
+  bool ok20 = (f.socx10>=200);
+  uint16_t bg = ok20? TFT_DARKGREEN : TFT_MAROON;
+  uint16_t fg = 0xA554; // MidGrey
+
+  tft.fillRect(0,0,W,STATUS_H,bg);
+
+  // Zeit links
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(2); tft.setTextColor(fg,bg);
+  tft.drawString(nowHHMM(), PAD_X, STATUS_H/2);
+
+  // Batterie Mitte
+  const int iconW=60, iconH=24;
+  const int iconX=W/2-iconW/2-25, iconY=STATUS_H/2-iconH/2;
+  tft.drawRect(iconX,iconY,iconW,iconH,fg);
+  tft.fillRect(iconX+iconW,iconY+iconH/4,4,iconH/2,fg);
+  int soc = f.socx10/10; int fillW=((iconW-4)*constrain(soc,0,100)/100);
+  tft.fillRect(iconX+2,iconY+2,fillW,iconH-4,fg);
+  tft.setTextDatum(MC_DATUM); tft.setTextFont(1); tft.setTextSize(2); tft.setTextColor(TFT_GREEN);
+  tft.drawString(String(soc)+"%", iconX+iconW/2, iconY+iconH/2);
+
+  // ETA rechts
+  tft.setTextDatum(MR_DATUM); tft.setTextFont(1); tft.setTextSize(2); tft.setTextColor(fg,bg);
+  tft.drawString(String("ETA: ")+fmtETA(f.eta20s), W-PAD_X, STATUS_H/2);
+
+  // Linie
+  tft.drawLine(PAD_X, headerLineY, W-PAD_X, headerLineY, TFT_DARKGREY);
+}
+
+// Seite 2 – String-Leistungen (PV1/PV2) als Balken + V/A-Anzeige
+static inline void drawPage2Content(TFT_eSPI& tft, const PvFrameV4& f){
+  // --- lokale Helfer ---
+  auto drawHBar = [&](int x, int y, int w, int h, int32_t valueW, int32_t maxW, uint16_t colFill){
+    if (maxW <= 0) maxW = 1;
+    tft.drawRect(x, y, w, h, TFT_DARKGREY);
+    int32_t v = valueW; if (v < 0) v = 0; if (v > maxW) v = maxW;
+    int fillW = (int)((int64_t)v * (w-2) / maxW);
+    if (fillW > 0) tft.fillRect(x+1, y+1, fillW, h-2, colFill);
+  };
+  auto fmtWatt = [](int32_t w)->String{
+    return (abs(w)>=1000) ? String(w/1000.0,2)+" kW" : String(w)+" W";
+  };
+
+  // Korrekte String-Leistung: Vx10 * Ax100 / 1000 -> Watt (mit +500 für Rundung)
+  const int32_t pv1W = ((int32_t)f.pv1Voltage_x10_V * (int32_t)f.pv1Current_x10_A + 500) / 1000;
+  const int32_t pv2W = ((int32_t)f.pv2Voltage_x10_V * (int32_t)f.pv2Current_x10_A + 500) / 1000;
+  // Gesamtleistung (Reg 32064) kommt bereits als Watt in f.pvW
+  const int32_t pvTotalW = f.pvW;
+
+  // Echte Einheiten für Anzeige (Strings)
+  const float pv1V = f.pv1Voltage_x10_V / 10.0f;
+  const float pv1A = f.pv1Current_x10_A / 100.0f;
+  const float pv2V = f.pv2Voltage_x10_V / 10.0f;
+  const float pv2A = f.pv2Current_x10_A / 100.0f;
+
+  // Layout
+  const int barMarginX = PAD_X;
+  const int barWidth   = W - 2*barMarginX;
+  const int barHeight  = 28;
+  const int gapY       = 34;
+
+  const int yTitle = startY + 10;
+  const int y1     = startY + 14 + 20;
+  const int y2     = y1 + barHeight + gapY;
+  const int y3     = y2 + barHeight + gapY;  // Gesamt
+
+  // Skalen
+  const int32_t MAX_W_STR  = 6000; // 6 kW für PV1/PV2
+  const int32_t MAX_W_TOT  = 9000; // 9 kW für Gesamt
+
+  // Titel + Hinweis für String-Balken
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("PV-String Leistung", PAD_X, yTitle);
+
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("PV1/PV2 max 6.0 kW", W-PAD_X, yTitle);
+
+  // ---- PV1 ----
+  drawHBar(barMarginX, y1, barWidth, barHeight, pv1W, MAX_W_STR, TFT_YELLOW);
+  // Label links
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("PV1", barMarginX, y1 - 4);
+  // Wert rechts
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(fmtWatt(pv1W), barMarginX + barWidth, y1 + barHeight/2);
+  // Unterzeile V/A
+  tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_CYAN, TFT_BLACK);
+
+  const int vaY1 = y1 + barHeight + 2;
+  char b1[32]; snprintf(b1,sizeof(b1),"%0.1f V   %0.2f A", pv1V, pv1A);
+  tft.drawString(String(b1), barMarginX + barWidth, vaY1);
+
+  // ---- PV2 ----
+  drawHBar(barMarginX, y2, barWidth, barHeight, pv2W, MAX_W_STR, TFT_ORANGE);
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("PV2", barMarginX, y2 - 4);
+  tft.setTextDatum(MR_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(fmtWatt(pv2W), barMarginX + barWidth, y2 + barHeight/2);
+  tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  char b2[32]; snprintf(b2,sizeof(b2),"%0.1f V   %0.2f A", pv2V, pv2A);
+  tft.drawString(String(b2), barMarginX + barWidth, y2 + barHeight + 2);
+
+  // ---- Gesamt PV ----
+  drawHBar(barMarginX, y3, barWidth, barHeight, pvTotalW, MAX_W_TOT, TFT_GREEN);
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("PV total", barMarginX, y3 - 4);
+  tft.setTextDatum(MR_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(fmtWatt(pvTotalW), barMarginX + barWidth, y3 + barHeight/2);
+
+  // Linie unten
+  tft.drawLine(PAD_X, y3 + barHeight + 6, W-PAD_X, y3 + barHeight + 6, TFT_DARKGREY);
+}
+
+// Seite 3 – Netzströme + Spannungen
+static inline void drawPage3Content(TFT_eSPI& tft, const PvFrameV4& f){
+  auto fmtA = [](int32_t a_x100)->String{
+    float a = a_x100 / 100.0f;
+    return String(a, 2) + " A";
+  };
+  auto fmtV = [](int32_t v_x10)->String{
+    float v = v_x10 / 10.0f;
+    return String(v, 1) + " V";
+  };
+
+  const int yTitle = startY + 8;
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Netz-Phasen", PAD_X, yTitle);
+
+  const int baseY = yTitle + 16;
+  const int lineH = 34;
+  const int col1X = PAD_X;
+  const int col2X = W/2 + 20;
+
+  // Spalten-Labels
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("Strom", col1X, baseY);
+  tft.drawString("Spannung", col2X, baseY);
+
+  auto drawRow = [&](const char* name, int32_t cur_x100, int32_t volt_x10, int y){
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString(name, PAD_X, y);
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(fmtA(cur_x100), col1X, y);
+    tft.drawString(fmtV(volt_x10), col2X, y);
+  };
+
+  drawRow("Phase A", f.gridCurrentA_x100_A, f.gridVoltageA_x10_V, baseY + lineH);
+  drawRow("Phase B", f.gridCurrentB_x100_A, f.gridVoltageB_x10_V, baseY + 2*lineH);
+  drawRow("Phase C", f.gridCurrentC_x100_A, f.gridVoltageC_x10_V, baseY + 3*lineH);
+
+  // Linie unten
+  tft.drawLine(PAD_X, baseY + 3*lineH + 8, W-PAD_X, baseY + 3*lineH + 8, TFT_DARKGREY);
+}
+
+// Anzeige der drei Haupt-Leistungen als horizontale Balken
+static inline void drawMainBars(TFT_eSPI& tft, const PvFrameV4& f){
+  auto drawBar = [&](int x, int y, int w, int h, int32_t valueW, int32_t maxAbsW, uint16_t colPos, uint16_t colNeg){
+    tft.drawRect(x, y, w, h, TFT_DARKGREY);
+    int32_t v = valueW;
+    if (v > maxAbsW)  v = maxAbsW;
+    if (v < -maxAbsW) v = -maxAbsW;
+    int mid = x + w/2;
+    if (v >= 0) {
+      int fillW = (int)((int64_t)v * (w/2-2) / maxAbsW);
+      if (fillW > 0) tft.fillRect(mid, y+1, fillW, h-2, colPos);
+    } else {
+      int fillW = (int)((int64_t)(-v) * (w/2-2) / maxAbsW);
+      if (fillW > 0) tft.fillRect(mid - fillW, y+1, fillW, h-2, colNeg);
+    }
+  };
+  auto fmtWatt = [](int32_t w)->String{
+    return (abs(w)>=1000) ? String(w/1000.0,2)+" kW" : String(w)+" W";
+  };
+
+  const int barMarginX = PAD_X;
+  const int barWidth   = W - 2*barMarginX;
+  const int barHeight  = 28;
+  const int gapY       = 34;
+
+  const int y1 = startY + 14;
+  const int y2 = y1 + barHeight + gapY;
+  const int y3 = y2 + barHeight + gapY;
+
+  const int32_t MAX_W = 6000; // +/-6 kW Skala
+
+  // PV
+  drawBar(barMarginX, y1, barWidth, barHeight, f.pvW, MAX_W, TFT_GREEN, TFT_DARKGREEN);
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("PV", barMarginX, y1 - 4);
+  tft.setTextDatum(MR_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(fmtWatt(f.pvW), barMarginX + barWidth, y1 + barHeight/2);
+
+  // Grid
+  drawBar(barMarginX, y2, barWidth, barHeight, f.gridW, MAX_W, TFT_GREEN, TFT_RED);
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("Grid (+Export / -Import)", barMarginX, y2 - 4);
+  tft.setTextDatum(MR_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(fmtWatt(f.gridW), barMarginX + barWidth, y2 + barHeight/2);
+
+  // Batt
+  drawBar(barMarginX, y3, barWidth, barHeight, f.battW, MAX_W, TFT_GREEN, TFT_RED);
+  tft.setTextDatum(ML_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("Batterie (+Laden / -Entladen)", barMarginX, y3 - 4);
+  tft.setTextDatum(MR_DATUM); tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(fmtWatt(f.battW), barMarginX + barWidth, y3 + barHeight/2);
+
+  // Linie unten
+  tft.drawLine(PAD_X, y3 + barHeight + 6, W-PAD_X, y3 + barHeight + 6, TFT_DARKGREY);
+}
+
+// Tabelle rechts oben mit den Haupt-Werten
+static inline void drawMainTable(TFT_eSPI& tft, const PvFrameV4& f){
+  auto drawRow = [&](int y, const char* label, const String& value){
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextFont(2); tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString(label, W/2 + 10, y);
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(value, W - PAD_X, y);
+  };
+
+  auto fmtWatt = [](int32_t w)->String{
+    if (abs(w) >= 1000) return String(w/1000.0, 2) + " kW";
+    return String(w) + " W";
+  };
+
+  auto fmtC = [](int16_t t10){ return String(t10/10.0,1) + " °C"; };
+  auto fmtKWh = [](float v){ return String(v,2) + " kWh"; };
+
+  int y = startY + 6;
+  const int dy = 26;
+  drawRow(y, "PV", fmtWatt(f.pvW));
+  y += dy;
+  drawRow(y, "Grid", fmtWatt(f.gridW));
+  y += dy;
+  drawRow(y, "Batterie", fmtWatt(f.battW));
+  y += dy;
+  drawRow(y, "Load", fmtWatt(f.loadW));
+  y += dy;
+  drawRow(y, "Temp", fmtC(f.temp10));
+  y += dy;
+  drawRow(y, "PV heute", fmtKWh(f.pvTodayKWh));
+  y += dy;
+  drawRow(y, "Grid Export", fmtKWh(f.gridExpToday));
+  y += dy;
+  drawRow(y, "Grid Import", fmtKWh(f.gridImpToday));
+  y += dy;
+  drawRow(y, "Load heute", fmtKWh(f.loadTodayKWh));
+}
+
+// Seite 1 – Hauptanzeige (Balken + Tabelle)
+static inline void drawPage1(TFT_eSPI& tft, const PvFrameV4& f){
+  drawStatusHeader(tft, f);
+  drawMainBars(tft, f);
+  drawMainTable(tft, f);
+}
+
+// Seite 2 – PV Strings
+static inline void drawPage2(TFT_eSPI& tft, const PvFrameV4& f){
+  drawStatusHeader(tft, f);
+  drawPage2Content(tft, f);
+}
+
+// Seite 3 – Netz-Phasen
+static inline void drawPage3(TFT_eSPI& tft, const PvFrameV4& f){
+  drawStatusHeader(tft, f);
+  drawPage3Content(tft, f);
+}
+
+// ===== Page-Dispatcher =====
+static inline void drawPvPage(TFT_eSPI& tft, int page, const PvFrameV4& f){
+  switch(page){
+    case 0: drawPage1(tft,f); break;
+    case 1: drawPage2(tft,f); break;
+    case 2: drawPage3(tft,f); break;
+    default: drawPage1(tft,f); break;
+  }
+}
+
+static inline int pvMaxPages(){ return 3; }
+
+// ---- Eingebettetes PvStats ----
+#ifndef STATS_MCAST_GRP
+  #define STATS_MCAST_GRP IPAddress(239, 0, 0, 58)
+#endif
+#ifndef STATS_MCAST_PORT
+  #define STATS_MCAST_PORT 43210   // Discover / Offer Kanal (Multicast)
+#endif
+#ifndef STATS_SERVER_PORT
+  #define STATS_SERVER_PORT 43211  // Unicast-Stream (Poller -> Client)
+#endif
+
+// ---- Nachrichten-Typen ----
+enum : uint8_t {
+  STATS_DISCOVER = 1,   // Client -> Multicast: "Wer ist Poller?"
+  STATS_OFFER    = 2,   // Poller -> Client: "Ich hier, nimm Port X"
+  STATS_REQ_RANGE= 3,   // Client -> Poller: "Schick mir alles (oder ab Zeit X)"
+  STATS_DAY      = 4,   // Poller -> Client: Tages-Datensatz
+  STATS_MON      = 5,   // Poller -> Client: Monats-Datensatz
+  STATS_ACK      = 6,   // Client -> Poller: ACK für Seq (derzeit ungenutzt)
+  STATS_DONE     = 7    // Poller -> Client: Ende des Streams
+};
+
+// ---- Header ----
+struct StatsHdr {
+  uint16_t magic;    // 0xCAFE
+  uint8_t  version;  // 1
+  uint8_t  type;     // STATS_*
+  uint32_t seq;      // Sequenznummer
+  uint16_t len;      // Payload-Länge
+  uint16_t crc;      // CRC über Header (crc=0) + Payload
+} __attribute__((packed));
+
+// CRC16-CCITT (0x1021, start 0xFFFF)
+inline uint16_t pvstats_crc(const StatsHdr& h, const uint8_t* payload){
+  auto crc16 = [](const uint8_t* data, size_t len, uint16_t c=0xFFFF){
+    for(size_t i=0;i<len;i++){
+      c ^= (uint16_t)data[i] << 8;
+      for(int k=0;k<8;k++) c = (c & 0x8000) ? (uint16_t)((c<<1) ^ 0x1021) : (uint16_t)(c<<1);
+    }
+    return c;
+  };
+  StatsHdr hc = h; hc.crc = 0;
+  uint16_t c = crc16((const uint8_t*)&hc, sizeof(StatsHdr));
+  if (h.len && payload) c = crc16(payload, h.len, c);
+  return c;
+}
+
+// ---- Discover/Offer ----
+struct PayloadOffer {
+  uint16_t statsPort; // Unicast-Port des Pollers
+  uint16_t rsv;
+} __attribute__((packed));
+
+struct PayloadReqRange {
+  // 0 bedeutet "ab Beginn/alles"
+  uint16_t fromY;    // ab Jahr
+  uint8_t  fromM;    // ab Monat
+  uint8_t  fromD;    // ab Tag
+  uint16_t fromMonY; // ab Monat-Jahr für Monatsblöcke
+  uint8_t  fromMonM; // ab Monat (1..12)
+  uint8_t  rsv;
+} __attribute__((packed));
+
+struct PayloadAck {
+  uint32_t ackSeq;
+} __attribute__((packed));
+
+// ---- WICHTIG: Payloads enthalten jetzt auch load_kWh ----
+struct PayloadDay {
+  uint16_t y, m, d;
+  float    gen_kWh;     // PV Erzeugung (integriert)
+  float    load_kWh;    // Load/Verbrauch (integriert)
+  float    impT1_kWh;   // Netzbezug T1
+  float    impT2_kWh;   // Netzbezug T2
+  float    exp_kWh;     // Einspeisung
+} __attribute__((packed));
+
+struct PayloadMon {
+  uint16_t y, m;
+  float    gen_kWh;     // PV Erzeugung (Summen aller Tage im Monat)
+  float    load_kWh;    // Verbrauch (Summen)
+  float    impT1_kWh;
+  float    impT2_kWh;
+  float    exp_kWh;
+} __attribute__((packed));
 
 // ---- Zeitzone (Fallback) ----
 #ifndef TZ_EU_ZURICH
