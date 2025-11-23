@@ -124,18 +124,14 @@ struct MonthAgg { // Monatswerte
   float exp_kWh;
 };
 
-// ---- TFT_eSPI über lokalen User_Setup.h laden ----
-#define USER_SETUP_LOADED
-#include "User_Setup.h"
+// ---- LovyanGFX Display & Touch (bereitgestellt über CYD_Display_Config.h) ----
+#include <CYD_Display_Config.h>
+#include <LovyanGFX.hpp>
 
-#ifndef TFT_BL
-  #define TFT_BL 21
-#endif
 #ifndef TFT_ROTATION
   #define TFT_ROTATION 1
 #endif
 
-#include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <AsyncUDP.h>
 #include <time.h>
@@ -143,16 +139,35 @@ struct MonthAgg { // Monatswerte
 
 #include <Credentials.h>
 
-// Touch (XPT2046) – CYD Pins
-#include <SPI.h>
-#include <XPT2046_Touchscreen.h>
-#define XPT2046_IRQ   36   // T_IRQ
-#define XPT2046_MOSI  32   // T_DIN
-#define XPT2046_MISO  39   // T_OUT
-#define XPT2046_CLK   25   // T_CLK
-#define XPT2046_CS    33   // T_CS
-SPIClass touchscreenSPI(VSPI);
-XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
+// Kompatibilitätsfarben (TFT_eSPI Palette)
+#ifndef TFT_BLACK
+  #define TFT_BLACK       0x0000
+  #define TFT_DARKGREEN   0x03E0
+  #define TFT_MAROON      0x7800
+  #define TFT_GREEN       0x07E0
+  #define TFT_DARKGREY    0x7BEF
+  #define TFT_BLUE        0x001F
+  #define TFT_RED         0xF800
+  #define TFT_LIGHTGREY   0xC618
+  #define TFT_YELLOW      0xFFE0
+  #define TFT_WHITE       0xFFFF
+  #define TFT_CYAN        0x07FF
+  #define TFT_BROWN       0x9A60
+  #define TFT_ORANGE      0xFDA0
+#endif
+
+// Text-Datum-Kompatibilität
+#ifndef TL_DATUM
+  #define TL_DATUM 0
+  #define TC_DATUM 1
+  #define TR_DATUM 2
+  #define ML_DATUM 3
+  #define MC_DATUM 4
+  #define MR_DATUM 5
+  #define BL_DATUM 6
+  #define BC_DATUM 7
+  #define BR_DATUM 8
+#endif
 
 
 // ==== PvCommon (inlined) ====
@@ -182,7 +197,7 @@ static inline uint16_t crc16_modbus(const uint8_t* data, size_t len) {
 }
 
 // ------------------------- Layout (CYD 320x240 landscape) -------------------------
-static constexpr int W=320, H=240;
+static int W=320, H=240;
 static constexpr int PAD_X=8, PAD_Y=6;
 static constexpr int STATUS_H=32;
 static constexpr int headerLineY=STATUS_H+2;
@@ -197,7 +212,7 @@ extern bool pvGetTodayLoad(float& load_kWh)  __attribute__((weak));
 // ================= Sichtbare Anzeige-Funktionen ===================
 
 // Header
-static inline void drawStatusHeader(TFT_eSPI& tft, const PvFrameV4& f){
+static inline void drawStatusHeader(LFFX& tft, const PvFrameV4& f){
   // lokale Lambdas
   auto nowHHMM = []() -> String {
     time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
@@ -241,7 +256,7 @@ static inline void drawStatusHeader(TFT_eSPI& tft, const PvFrameV4& f){
 }
 
 // Seite 2 – String-Leistungen (PV1/PV2) als Balken + V/A-Anzeige
-static inline void drawPage2Content(TFT_eSPI& tft, const PvFrameV4& f){
+static inline void drawPage2Content(LFFX& tft, const PvFrameV4& f){
   // --- lokale Helfer ---
   auto drawHBar = [&](int x, int y, int w, int h, int32_t valueW, int32_t maxW, uint16_t colFill){
     if (maxW <= 0) maxW = 1;
@@ -334,7 +349,7 @@ static inline void drawPage2Content(TFT_eSPI& tft, const PvFrameV4& f){
 }
 
 // Seite 3 – Uhrzeit + Datum
-static inline void drawPage3Content(TFT_eSPI& tft, const PvFrameV4&){
+static inline void drawPage3Content(LFFX& tft, const PvFrameV4&){
   // lokale Lambdas
   auto nowHHMM = []() -> String {
     time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
@@ -366,7 +381,7 @@ static inline void drawPage3Content(TFT_eSPI& tft, const PvFrameV4&){
 }
 
 // Seite 5 – Drei Zeiger-Gauges: PV (Reg 32064), Batterie (±), Grid (±)
-static void drawPage5Content(TFT_eSPI& tft, const PvFrameV4& f){
+static void drawPage5Content(LFFX& tft, const PvFrameV4& f){
   // ---------- Geometrie ----------
   const int gaugesY = 42;               // Oberkante der 3 Meter
   const int gW = 100, gH = 160;         // Größe pro Meter
@@ -448,7 +463,7 @@ static void drawPage5Content(TFT_eSPI& tft, const PvFrameV4& f){
     if (vMax == vMin) vMax = vMin + 1.0f;
 
     // Sprite pro Gauge – simpel & flackerfrei (wird jedes Mal erstellt)
-    TFT_eSprite spr(&tft);
+    lgfx::LGFX_Sprite spr(&tft);
     spr.setColorDepth(16);
     spr.createSprite(w, h);
     spr.fillSprite(TFT_BLACK);
@@ -687,7 +702,7 @@ static void drawPage5Content(TFT_eSPI& tft, const PvFrameV4& f){
 // === Seite 6: 30-Tage- oder Monats-Balken (Export oben grün; Bezug unten T1 rot + T2 blau) ===
 // NVS: Namespace "pvstats", Keys je Tag: DYYYYMMDD  (DayAgg-Blob)
 //      bzw. je Monat: MYYYYMM    (DayAgg-Blob als Monatsaggregation)
-static void drawPage6Content(TFT_eSPI& tft, const PvFrameV4& , int kind) {
+static void drawPage6Content(LFFX& tft, const PvFrameV4& , int kind) {
   auto ymdFromTime = [](time_t tt)->uint32_t {
     struct tm tmv; localtime_r(&tt, &tmv);
     return (uint32_t)((tmv.tm_year+1900)*10000 + (tmv.tm_mon+1)*100 + tmv.tm_mday);
@@ -927,9 +942,9 @@ static constexpr int PV_MAX_PAGES = 5; // 0..4 sichtbar
 static inline int pvMaxPages(){ return PV_MAX_PAGES; }
 
 // Öffentliche API: rendert Header, löscht Inhalt, rendert Seite
-static inline void drawPvPage(TFT_eSPI& tft, const PvFrameV4& f, int page){
+static inline void drawPvPage(LFFX& tft, const PvFrameV4& f, int page){
   // lokales clearContent (gekapselt)
-  auto clearContentArea = [&](TFT_eSPI& t){
+  auto clearContentArea = [&](LFFX& t){
     const int y = headerLineY + 1;
     t.fillRect(0, y, W, H - y, TFT_BLACK);
   };
@@ -982,7 +997,7 @@ inline uint16_t pvstats_crc(const StatsHdr& h, const uint8_t* payload){
 //Comes from Credentials.h
 
 // ===== Anzeige =====
-TFT_eSPI tft;
+LFFX tft;
 
 // ===== UDP =====
 AsyncUDP udpFrame;       // Multicast Frames (v4)
@@ -999,13 +1014,8 @@ static uint32_t  lastRxMs=0;
 static int pageIndex = 0;  // wird durch Swipe geändert
 
 // ===== Touch/Swipe Konfiguration (Rotation 1: Landscape 320x240) =====
-static const int SCREEN_W = 320;
-static const int SCREEN_H = 240;
-// Kalibrierung (wie getestet)
-static const int TOUCH_X_MIN = 200;
-static const int TOUCH_X_MAX = 3700;
-static const int TOUCH_Y_MIN = 240;
-static const int TOUCH_Y_MAX = 3800;
+static int SCREEN_W = 320;
+static int SCREEN_H = 240;
 
 // Swipe-Erkennung
 static const int SWIPE_MIN_DIST = 60;     // min. 60 px horizontal
@@ -1130,17 +1140,13 @@ static void handleDayMonthRollover(){
 
 // ===== Touch lesen =====
 static bool readTouchAvg(int &x, int &y) {
-  if (!(touchscreen.tirqTouched() && touchscreen.touched())) return false; // falls T_IRQ nicht angeschlossen -> nur touchscreen.touched()
-
   long sx = 0, sy = 0; int n = 0;
   for (int i=0; i<TOUCH_SAMPLES; ++i) {
-    if (!(touchscreen.tirqTouched() && touchscreen.touched())) break;
-    TS_Point p = touchscreen.getPoint(); // roher Wert
-    int rx = map(p.x, TOUCH_X_MIN, TOUCH_X_MAX, 1, SCREEN_W);
-    int ry = map(p.y, TOUCH_Y_MIN, TOUCH_Y_MAX, 1, SCREEN_H);
-    if (rx < 1) rx = 1; if (rx > SCREEN_W) rx = SCREEN_W;
-    if (ry < 1) ry = 1; if (ry > SCREEN_H) ry = SCREEN_H;
-    sx += rx; sy += ry; n++;
+    int32_t tx=0, ty=0;
+    if (!tft.getTouch(&tx, &ty)) break;
+    if (tx < 0) tx = 0; if (ty < 0) ty = 0;
+    if (tx > SCREEN_W) tx = SCREEN_W; if (ty > SCREEN_H) ty = SCREEN_H;
+    sx += tx; sy += ty; n++;
     delay(2);
   }
   if (n == 0) return false;
@@ -1593,14 +1599,10 @@ void setup(){
   Serial.begin(115200);
   tft.init(); tft.setRotation(TFT_ROTATION);
   tft.fillScreen(TFT_BLACK);
-  #ifdef TFT_BL
-    pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
-  #endif
-
-  // Touch init
-  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touchscreen.begin(touchscreenSPI);
-  touchscreen.setRotation(1);  // Landscape-1
+  SCREEN_W = tft.width();
+  SCREEN_H = tft.height();
+  W = SCREEN_W;
+  H = SCREEN_H;
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
