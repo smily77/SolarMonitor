@@ -125,8 +125,21 @@ struct MonthAgg { // Monatswerte
 };
 
 // ---- LovyanGFX Display & Touch (bereitgestellt über CYD_Display_Config.h) ----
-#include <CYD_Display_Config.h>
 #include <LovyanGFX.hpp>
+// Bevorzugt die vom Nutzer bereitgestellte Konfiguration aus dem Sketch-Verzeichnis.
+#if __has_include("CYD_Display_Config.h")
+#include "CYD_Display_Config.h"
+#define HAS_LFFX_FROM_CONFIG 1
+#elif __has_include(<CYD_Display_Config.h>)
+#include <CYD_Display_Config.h>
+#define HAS_LFFX_FROM_CONFIG 1
+#endif
+
+// Fallback: wenn keine Konfigurationsdatei vorhanden ist, auf eine generische LovyanGFX-Instanz zurückfallen,
+// damit der Sketch weiterhin übersetzbar bleibt (funktionale Parameter müssen dann vom Nutzer ergänzt werden).
+#ifndef HAS_LFFX_FROM_CONFIG
+using LFFX = LGFX;
+#endif
 
 #ifndef TFT_ROTATION
   #define TFT_ROTATION 1
