@@ -3,6 +3,14 @@
 // Typen (z.B. PvFrameV4, StatsHdr) in Signaturen korrekt erkannt werden.
 #define ARDUINO_NO_PROTOTYPES
 
+// Vorwärtsdeklarationen für alle benutzerdefinierten Datentypen, damit die
+// (vom Arduino-Builder ggf. dennoch erzeugten) Prototypen eine gültige,
+// vollständige Referenz besitzen.
+struct PvFrameV4;
+struct StatsHdr;
+struct DayAgg;
+struct MonthAgg;
+
 // Rolle zur Compile-Zeit wählen: Poller liest Werte aus und verteilt sie,
 // Client zeigt lediglich empfangene Daten an.
 //#define ROLE_POLLER    // einkommentieren = Poller; auskommentieren = Client
@@ -66,7 +74,7 @@ static inline uint16_t crc16_modbus(const uint8_t* data, size_t len) {
 #define PV_MAGIC   0xBEEF
 #define PV_VERSION 4
 
-typedef struct __attribute__((packed)) {
+struct PvFrameV4 {
   uint16_t magic;         // PV_MAGIC
   uint8_t  version;       // PV_VERSION (=4)
   uint32_t seq;           // laufende Nummer
@@ -103,7 +111,7 @@ typedef struct __attribute__((packed)) {
   int32_t  gridCurrentC_x100_A;
 
   uint16_t crc;           // CRC-16 (Modbus) über alles bis vor 'crc'
-} PvFrameV4;
+} __attribute__((packed));
 
 // ------------------------- Layout (CYD 320x240 landscape) -------------------------
 static constexpr int W=320, H=240;
@@ -749,14 +757,14 @@ static void handleTouchSwipe(){
       if (pageIndex > 0) pageIndex--;
     }
 
-    if (pageIndex != oldPage) drawPvPage(tft, lastF, pageIndex);  // ganze Seite neu zeichnen
+    if (pageIndex != oldPage) drawPvPage(tft, pageIndex, lastF);  // ganze Seite neu zeichnen
   }
 }
 
 // ====== Zeichnen ======
 static void drawIfFrame(){
   if (!haveFrame) return;
-  drawPvPage(tft, lastF, pageIndex);
+  drawPvPage(tft, pageIndex, lastF);
 }
 
 #ifdef ROLE_POLLER
