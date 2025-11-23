@@ -1,70 +1,11 @@
 // Patched full sketch: Poller/Client with atomic snapshots to fix integration mismatches
+#include <Arduino.h>
+
 /************* Rolle auswählen *************/
 //#define ROLE_POLLER    // einkommentieren = Poller; auskommentieren = Client
 /*******************************************/
 
-// ---- TFT_eSPI über lokalen User_Setup.h laden ----
-#define USER_SETUP_LOADED
-#include "User_Setup.h"
-
-#ifndef TFT_BL
-  #define TFT_BL 21
-#endif
-#ifndef TFT_ROTATION
-  #define TFT_ROTATION 1
-#endif
-
-#include <TFT_eSPI.h>
-#include <WiFi.h>
-#include <AsyncUDP.h>
-#include <time.h>
-#include <Preferences.h>
-#include <Streaming.h>
-
-#include <Credentials.h>
-
-// Touch (XPT2046) – CYD Pins
-#include <SPI.h>
-#include <XPT2046_Touchscreen.h>
-#define XPT2046_IRQ   36   // T_IRQ
-#define XPT2046_MOSI  32   // T_DIN
-#define XPT2046_MISO  39   // T_OUT
-#define XPT2046_CLK   25   // T_CLK
-#define XPT2046_CS    33   // T_CS
-SPIClass touchscreenSPI(VSPI);
-XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
-
-
-// ==== PvCommon (inlined) ====
-#include <Arduino.h>
-#include <TFT_eSPI.h>
-#include <time.h>
-
-// ------------------------- Anzeige-Konstanten -------------------------
-#define tagesAnzeige  1
-#define monatsAnzeige 2
-#define expPreis 0.138
-#define t1Preis 0.344
-#define t2Preis 0.2597
-
-// ================= Multicast (UDP) =================
-static const IPAddress MCAST_GRP(239, 12, 12, 12);
-static const uint16_t  MCAST_PORT = 55221;
-
-// ================= CRC16 (Modbus) =================
-static inline uint16_t crc16_modbus(const uint8_t* data, size_t len) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < len; i++) {
-    crc ^= data[i];
-    for (int j = 0; j < 8; j++) {
-      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
-      else         crc >>= 1;
-    }
-  }
-  return crc;
-}
-
-// ------------------------- Frame V4 -------------------------
+// ================= Grundtypen und Frames =================
 #define PV_MAGIC   0xBEEF
 #define PV_VERSION 4
 
@@ -106,6 +47,119 @@ typedef struct __attribute__((packed)) {
 
   uint16_t crc;           // CRC-16 (Modbus) über alles bis vor 'crc'
 } PvFrameV4;
+
+// ---- PvStats Payloads/Headers ----
+struct StatsHdr {
+  uint16_t magic;    // 0xCAFE
+  uint8_t  version;  // 1
+  uint8_t  type;     // STATS_*
+  uint32_t seq;      // Sequenznummer
+  uint16_t len;      // Payload-Länge
+  uint16_t crc;      // CRC über Header (crc=0) + Payload
+} __attribute__((packed));
+
+struct PayloadOffer { uint16_t statsPort; uint16_t rsv; } __attribute__((packed));
+struct PayloadReqRange {
+  uint16_t fromY;    // ab Jahr
+  uint8_t  fromM;    // ab Monat
+  uint8_t  fromD;    // ab Tag
+  uint16_t fromMonY; // ab Monat-Jahr
+  uint8_t  fromMonM; // ab Monat (1..12)
+  uint8_t  rsv;
+} __attribute__((packed));
+struct PayloadAck { uint32_t ackSeq; } __attribute__((packed));
+struct PayloadDay {
+  uint16_t y, m, d;
+  float    gen_kWh;
+  float    load_kWh;
+  float    impT1_kWh;
+  float    impT2_kWh;
+  float    exp_kWh;
+} __attribute__((packed));
+struct PayloadMon {
+  uint16_t y, m; // Monat (1..12)
+  float    gen_kWh;
+  float    load_kWh;
+  float    impT1_kWh;
+  float    impT2_kWh;
+  float    exp_kWh;
+} __attribute__((packed));
+
+// ---- Integrations-Container ----
+struct DayAgg {   // Tageswerte
+  float gen_kWh;
+  float load_kWh;
+  float impT1_kWh;
+  float impT2_kWh;
+  float exp_kWh;
+};
+
+struct MonthAgg { // Monatswerte
+  float gen_kWh;
+  float load_kWh;
+  float impT1_kWh;
+  float impT2_kWh;
+  float exp_kWh;
+};
+
+// ---- TFT_eSPI über lokalen User_Setup.h laden ----
+#define USER_SETUP_LOADED
+#include "User_Setup.h"
+
+#ifndef TFT_BL
+  #define TFT_BL 21
+#endif
+#ifndef TFT_ROTATION
+  #define TFT_ROTATION 1
+#endif
+
+#include <TFT_eSPI.h>
+#include <WiFi.h>
+#include <AsyncUDP.h>
+#include <time.h>
+#include <Preferences.h>
+#include <Streaming.h>
+
+#include <Credentials.h>
+
+// Touch (XPT2046) – CYD Pins
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+#define XPT2046_IRQ   36   // T_IRQ
+#define XPT2046_MOSI  32   // T_DIN
+#define XPT2046_MISO  39   // T_OUT
+#define XPT2046_CLK   25   // T_CLK
+#define XPT2046_CS    33   // T_CS
+SPIClass touchscreenSPI(VSPI);
+XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
+
+
+// ==== PvCommon (inlined) ====
+#include <time.h>
+
+// ------------------------- Anzeige-Konstanten -------------------------
+#define tagesAnzeige  1
+#define monatsAnzeige 2
+#define expPreis 0.138
+#define t1Preis 0.344
+#define t2Preis 0.2597
+
+// ================= Multicast (UDP) =================
+static const IPAddress MCAST_GRP(239, 12, 12, 12);
+static const uint16_t  MCAST_PORT = 55221;
+
+// ================= CRC16 (Modbus) =================
+static inline uint16_t crc16_modbus(const uint8_t* data, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else         crc >>= 1;
+    }
+  }
+  return crc;
+}
 
 // ------------------------- Layout (CYD 320x240 landscape) -------------------------
 static constexpr int W=320, H=240;
@@ -621,22 +675,11 @@ static void drawPage5Content(TFT_eSPI& tft, const PvFrameV4& f){
 // NVS: Namespace "pvstats", Keys je Tag: DYYYYMMDD  (DayAgg-Blob)
 //      bzw. je Monat: MYYYYMM    (DayAgg-Blob als Monatsaggregation)
 static void drawPage6Content(TFT_eSPI& tft, const PvFrameV4& , int kind) {
-  #include <Preferences.h>
-  #include <time.h>
-
   auto ymdFromTime = [](time_t tt)->uint32_t {
     struct tm tmv; localtime_r(&tt, &tmv);
     return (uint32_t)((tmv.tm_year+1900)*10000 + (tmv.tm_mon+1)*100 + tmv.tm_mday);
   };
   auto prevDay = [](time_t tt)->time_t { return tt - 86400; };
-
-  struct DayAgg { // Tageswerte
-    float gen_kWh;
-    float load_kWh;
-    float impT1_kWh;
-    float impT2_kWh;
-    float exp_kWh;
-  };
 
   auto decMonth = [&](int &y, int &m){
     m--; if (m < 1) { m = 12; y--; }
@@ -897,41 +940,7 @@ static inline void drawPvPage(TFT_eSPI& tft, const PvFrameV4& f, int page){
   // Frame v4, drawPvPage(...), pvMaxPages(), crc16_modbus, MCAST_GRP, MCAST_PORT
 
 // ==== PvStats (inlined) ====
-// ===================== PvStats.h =====================
-#include <Arduino.h>
-#include <IPAddress.h>
-
-// ---- Multicast & Ports (kannst du bei Bedarf anpassen) ----
-#ifndef STATS_MCAST_GRP
-  #define STATS_MCAST_GRP IPAddress(239, 0, 0, 58)
-#endif
-#ifndef STATS_MCAST_PORT
-  #define STATS_MCAST_PORT 43210   // Discover / Offer Kanal (Multicast)
-#endif
-#ifndef STATS_SERVER_PORT
-  #define STATS_SERVER_PORT 43211  // Unicast-Stream (Poller -> Client)
-#endif
-
-// ---- Nachrichten-Typen ----
-enum : uint8_t {
-  STATS_DISCOVER = 1,   // Client -> Multicast: "Wer ist Poller?"
-  STATS_OFFER    = 2,   // Poller -> Client: "Ich hier, nimm Port X"
-  STATS_REQ_RANGE= 3,   // Client -> Poller: "Schick mir alles (oder ab Zeit X)"
-  STATS_DAY      = 4,   // Poller -> Client: Tages-Datensatz
-  STATS_MON      = 5,   // Poller -> Client: Monats-Datensatz
-  STATS_ACK      = 6,   // Client -> Poller: ACK für Seq (derzeit ungenutzt)
-  STATS_DONE     = 7    // Poller -> Client: Ende des Streams
-};
-
-// ---- Header ----
-struct StatsHdr {
-  uint16_t magic;    // 0xCAFE
-  uint8_t  version;  // 1
-  uint8_t  type;     // STATS_*
-  uint32_t seq;      // Sequenznummer
-  uint16_t len;      // Payload-Länge
-  uint16_t crc;      // CRC über Header (crc=0) + Payload
-} __attribute__((packed));
+// Multicast/Ports, Typen und Payloads sind oben definiert (sichtbar für Arduino-Prototyper)
 
 // CRC16-CCITT (0x1021, start 0xFFFF)
 inline uint16_t pvstats_crc(const StatsHdr& h, const uint8_t* payload){
@@ -947,45 +956,6 @@ inline uint16_t pvstats_crc(const StatsHdr& h, const uint8_t* payload){
   if (h.len && payload) c = crc16(payload, h.len, c);
   return c;
 }
-
-// ---- Discover/Offer ----
-struct PayloadOffer {
-  uint16_t statsPort; // Unicast-Port des Pollers
-  uint16_t rsv;
-} __attribute__((packed));
-
-struct PayloadReqRange {
-  // 0 bedeutet "ab Beginn/alles"
-  uint16_t fromY;    // ab Jahr
-  uint8_t  fromM;    // ab Monat
-  uint8_t  fromD;    // ab Tag
-  uint16_t fromMonY; // ab Monat-Jahr für Monatsblöcke
-  uint8_t  fromMonM; // ab Monat (1..12)
-  uint8_t  rsv;
-} __attribute__((packed));
-
-struct PayloadAck {
-  uint32_t ackSeq;
-} __attribute__((packed));
-
-// ---- WICHTIG: Payloads enthalten jetzt auch load_kWh ----
-struct PayloadDay {
-  uint16_t y, m, d;
-  float    gen_kWh;     // PV Erzeugung (integriert)
-  float    load_kWh;    // Load/Verbrauch (integriert)
-  float    impT1_kWh;   // Netzbezug T1
-  float    impT2_kWh;   // Netzbezug T2
-  float    exp_kWh;     // Einspeisung
-} __attribute__((packed));
-
-struct PayloadMon {
-  uint16_t y, m;
-  float    gen_kWh;     // PV Erzeugung (Summen aller Tage im Monat)
-  float    load_kWh;    // Verbrauch (Summen)
-  float    impT1_kWh;
-  float    impT2_kWh;
-  float    exp_kWh;
-} __attribute__((packed));
 
 // ==== end PvStats ====
    // bereits übernommen (enthält load_kWh in Payloads)
@@ -1039,21 +1009,6 @@ static int      tsLastX    = 0;
 static int      tsLastY    = 0;
 
 // ===== Integrations-/Speicher-Modelle =====
-struct DayAgg {   // Tageswerte
-  float gen_kWh;
-  float load_kWh;
-  float impT1_kWh;
-  float impT2_kWh;
-  float exp_kWh;
-};
-struct MonthAgg { // Monatswerte
-  float gen_kWh;
-  float load_kWh;
-  float impT1_kWh;
-  float impT2_kWh;
-  float exp_kWh;
-};
-
 static DayAgg   dayAgg = {0,0,0,0,0};
 static MonthAgg monthAgg = {0,0,0,0,0};
 
