@@ -1,4 +1,7 @@
 // SolarDisplayGPT1: vereinfachte Variante des Sketches
+// Automatische Arduino-Prototypen deaktivieren, damit benutzerdefinierte
+// Typen (z.B. PvFrameV4, StatsHdr) in Signaturen korrekt erkannt werden.
+#define ARDUINO_NO_PROTOTYPES
 // Rolle zur Compile-Zeit wählen: Poller liest Werte aus und verteilt sie,
 // Client zeigt lediglich empfangene Daten an.
 //#define ROLE_POLLER    // einkommentieren = Poller; auskommentieren = Client
