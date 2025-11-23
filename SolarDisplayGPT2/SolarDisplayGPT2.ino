@@ -129,16 +129,16 @@ struct MonthAgg { // Monatswerte
 // Bevorzugt die vom Nutzer bereitgestellte Konfiguration aus dem Sketch-Verzeichnis.
 #if __has_include("CYD_Display_Config.h")
 #include "CYD_Display_Config.h"
-#define HAS_LFFX_FROM_CONFIG 1
+#define HAS_LGFX_CONFIG 1
 #elif __has_include(<CYD_Display_Config.h>)
 #include <CYD_Display_Config.h>
-#define HAS_LFFX_FROM_CONFIG 1
+#define HAS_LGFX_CONFIG 1
 #endif
 
-// Fallback: wenn keine Konfigurationsdatei vorhanden ist, auf eine generische LovyanGFX-Instanz zurückfallen,
-// damit der Sketch weiterhin übersetzbar bleibt (funktionale Parameter müssen dann vom Nutzer ergänzt werden).
-#ifndef HAS_LFFX_FROM_CONFIG
-using LFFX = LGFX;
+// Fallback: falls die Konfiguration keine LGFX-Klasse bereitstellt, ersatzweise eine generische Instanz anbieten,
+// damit der Sketch weiterhin übersetzbar bleibt (Parameter müssen vom Nutzer ergänzt werden).
+#ifndef HAS_LGFX_CONFIG
+class LGFX : public lgfx::LGFX_Device {};
 #endif
 
 #ifndef TFT_ROTATION
@@ -225,7 +225,7 @@ extern bool pvGetTodayLoad(float& load_kWh)  __attribute__((weak));
 // ================= Sichtbare Anzeige-Funktionen ===================
 
 // Header
-static inline void drawStatusHeader(LFFX& tft, const PvFrameV4& f){
+static inline void drawStatusHeader(LGFX& tft, const PvFrameV4& f){
   // lokale Lambdas
   auto nowHHMM = []() -> String {
     time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
@@ -269,7 +269,7 @@ static inline void drawStatusHeader(LFFX& tft, const PvFrameV4& f){
 }
 
 // Seite 2 – String-Leistungen (PV1/PV2) als Balken + V/A-Anzeige
-static inline void drawPage2Content(LFFX& tft, const PvFrameV4& f){
+static inline void drawPage2Content(LGFX& tft, const PvFrameV4& f){
   // --- lokale Helfer ---
   auto drawHBar = [&](int x, int y, int w, int h, int32_t valueW, int32_t maxW, uint16_t colFill){
     if (maxW <= 0) maxW = 1;
@@ -362,7 +362,7 @@ static inline void drawPage2Content(LFFX& tft, const PvFrameV4& f){
 }
 
 // Seite 3 – Uhrzeit + Datum
-static inline void drawPage3Content(LFFX& tft, const PvFrameV4&){
+static inline void drawPage3Content(LGFX& tft, const PvFrameV4&){
   // lokale Lambdas
   auto nowHHMM = []() -> String {
     time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
@@ -394,7 +394,7 @@ static inline void drawPage3Content(LFFX& tft, const PvFrameV4&){
 }
 
 // Seite 5 – Drei Zeiger-Gauges: PV (Reg 32064), Batterie (±), Grid (±)
-static void drawPage5Content(LFFX& tft, const PvFrameV4& f){
+static void drawPage5Content(LGFX& tft, const PvFrameV4& f){
   // ---------- Geometrie ----------
   const int gaugesY = 42;               // Oberkante der 3 Meter
   const int gW = 100, gH = 160;         // Größe pro Meter
@@ -715,7 +715,7 @@ static void drawPage5Content(LFFX& tft, const PvFrameV4& f){
 // === Seite 6: 30-Tage- oder Monats-Balken (Export oben grün; Bezug unten T1 rot + T2 blau) ===
 // NVS: Namespace "pvstats", Keys je Tag: DYYYYMMDD  (DayAgg-Blob)
 //      bzw. je Monat: MYYYYMM    (DayAgg-Blob als Monatsaggregation)
-static void drawPage6Content(LFFX& tft, const PvFrameV4& , int kind) {
+static void drawPage6Content(LGFX& tft, const PvFrameV4& , int kind) {
   auto ymdFromTime = [](time_t tt)->uint32_t {
     struct tm tmv; localtime_r(&tt, &tmv);
     return (uint32_t)((tmv.tm_year+1900)*10000 + (tmv.tm_mon+1)*100 + tmv.tm_mday);
@@ -955,9 +955,9 @@ static constexpr int PV_MAX_PAGES = 5; // 0..4 sichtbar
 static inline int pvMaxPages(){ return PV_MAX_PAGES; }
 
 // Öffentliche API: rendert Header, löscht Inhalt, rendert Seite
-static inline void drawPvPage(LFFX& tft, const PvFrameV4& f, int page){
+static inline void drawPvPage(LGFX& tft, const PvFrameV4& f, int page){
   // lokales clearContent (gekapselt)
-  auto clearContentArea = [&](LFFX& t){
+  auto clearContentArea = [&](LGFX& t){
     const int y = headerLineY + 1;
     t.fillRect(0, y, W, H - y, TFT_BLACK);
   };
@@ -1010,7 +1010,7 @@ inline uint16_t pvstats_crc(const StatsHdr& h, const uint8_t* payload){
 //Comes from Credentials.h
 
 // ===== Anzeige =====
-LFFX tft;
+LGFX tft;
 
 // ===== UDP =====
 AsyncUDP udpFrame;       // Multicast Frames (v4)
