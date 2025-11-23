@@ -1,4 +1,4 @@
-// Patched full sketch: Poller/Client with atomic snapshots to fix integration mismatches
+// Vollständiger Sketch: Poller/Client mit identischer Anzeige
 #include <Arduino.h>
 
 /************* Rolle auswählen *************/
@@ -140,7 +140,6 @@ struct MonthAgg { // Monatswerte
 #include <AsyncUDP.h>
 #include <time.h>
 #include <Preferences.h>
-#include <Streaming.h>
 
 #include <Credentials.h>
 
@@ -157,7 +156,6 @@ XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
 
 // ==== PvCommon (inlined) ====
-#include <time.h>
 
 // ------------------------- Anzeige-Konstanten -------------------------
 #define tagesAnzeige  1
@@ -191,17 +189,10 @@ static constexpr int headerLineY=STATUS_H+2;
 static constexpr int startY = headerLineY + 6;
 
 // ------------------------- Optionale Provider-Hooks (weak) -------------------------
-#if defined(__GNUC__)
 extern bool pvGetTodaySplits(float& t1_kWh, float& t2_kWh) __attribute__((weak));
 extern bool pvGetTodayExport(float& exp_kWh) __attribute__((weak));
 extern bool pvGetTodayPV(float& pv_kWh)      __attribute__((weak));
 extern bool pvGetTodayLoad(float& load_kWh)  __attribute__((weak));
-#else
-extern bool pvGetTodaySplits(float& t1_kWh, float& t2_kWh);
-extern bool pvGetTodayExport(float& exp_kWh);
-extern bool pvGetTodayPV(float& pv_kWh);
-extern bool pvGetTodayLoad(float& load_kWh);
-#endif
 
 // ================= Sichtbare Anzeige-Funktionen ===================
 
