@@ -58,6 +58,28 @@ struct StatsHdr {
   uint16_t crc;      // CRC über Header (crc=0) + Payload
 } __attribute__((packed));
 
+// ---- Multicast & Ports (analog PvStats.h) ----
+#ifndef STATS_MCAST_GRP
+  #define STATS_MCAST_GRP IPAddress(239, 0, 0, 58)
+#endif
+#ifndef STATS_MCAST_PORT
+  #define STATS_MCAST_PORT 43210   // Discover / Offer Kanal (Multicast)
+#endif
+#ifndef STATS_SERVER_PORT
+  #define STATS_SERVER_PORT 43211  // Unicast-Stream (Poller -> Client)
+#endif
+
+// ---- Nachrichten-Typen ----
+enum : uint8_t {
+  STATS_DISCOVER = 1,   // Client -> Multicast: "Wer ist Poller?"
+  STATS_OFFER    = 2,   // Poller -> Client: "Ich hier, nimm Port X"
+  STATS_REQ_RANGE= 3,   // Client -> Poller: "Schick mir alles (oder ab Zeit X)"
+  STATS_DAY      = 4,   // Poller -> Client: Tages-Datensatz
+  STATS_MON      = 5,   // Poller -> Client: Monats-Datensatz
+  STATS_ACK      = 6,   // Client -> Poller: ACK für Seq (derzeit ungenutzt)
+  STATS_DONE     = 7    // Poller -> Client: Ende des Streams
+};
+
 struct PayloadOffer { uint16_t statsPort; uint16_t rsv; } __attribute__((packed));
 struct PayloadReqRange {
   uint16_t fromY;    // ab Jahr
