@@ -218,6 +218,12 @@ static int   STATUS_H=32;
 static int   headerLineY=STATUS_H+2;
 static int   startY = headerLineY + 6;
 
+// Swipe-/Tap-Konstanten werden ebenfalls skaliert, daher hier vorab deklariert
+static int SWIPE_MIN_DIST = 60;     // min. 60 px horizontal
+static int SWIPE_MAX_TIME = 1000;   // max. 1s
+static int TAP_MAX_DIST   = 15;     // kleiner Versatz -> Tap
+static int TOUCH_SAMPLES  = 3;      // Mittelung
+
 static inline int scaleDim(int v){
   int r = (int)lroundf(v * layoutScale);
   return (r==0 && v>0) ? 1 : r;
@@ -1053,12 +1059,6 @@ static int pageIndex = 0;  // wird durch Swipe geändert
 // ===== Touch/Swipe Konfiguration (Rotation 1: Landscape 320x240) =====
 static int SCREEN_W = 320;
 static int SCREEN_H = 240;
-
-// Swipe-Erkennung
-static int SWIPE_MIN_DIST = 60;     // min. 60 px horizontal
-static int SWIPE_MAX_TIME = 1000;   // max. 1s
-static int TAP_MAX_DIST   = 15;     // kleiner Versatz -> Tap
-static int TOUCH_SAMPLES  = 3;      // Mittelung
 
 static bool     tsDown     = false;
 static int      tsStartX   = 0;
