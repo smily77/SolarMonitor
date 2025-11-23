@@ -3,12 +3,6 @@
 // Typen (z.B. PvFrameV4, StatsHdr) in Signaturen korrekt erkannt werden.
 #define ARDUINO_NO_PROTOTYPES
 
-// Vorwärtsdeklarationen, damit generierte Prototypen die benutzerdefinierten
-// Typen erkennen, auch wenn die vollständigen Definitionen später folgen.
-struct PvFrameV4;
-struct StatsHdr;
-struct DayAgg;
-struct MonthAgg;
 // Rolle zur Compile-Zeit wählen: Poller liest Werte aus und verteilt sie,
 // Client zeigt lediglich empfangene Daten an.
 //#define ROLE_POLLER    // einkommentieren = Poller; auskommentieren = Client
