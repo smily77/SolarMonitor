@@ -135,7 +135,7 @@ extern bool pvGetTodayLoad(float& load_kWh) __attribute__((weak));
 
 // ================= Anzeige-Funktionen ===================
 
-static inline void drawStatusHeader(LGFX& tft, const PvFrameV4& f){
+static inline void drawStatusHeader(LGFX& lcd, const PvFrameV4& f){
   // lokale Lambdas
   auto nowHHMM = []() -> String {
     time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
@@ -179,7 +179,7 @@ static inline void drawStatusHeader(LGFX& tft, const PvFrameV4& f){
 }
 
 // Seite 2: PV-String Leistungen (PV1/PV2)
-static inline void drawPage2Content(LGFX& tft, const PvFrameV4& f){
+static inline void drawPage2Content(LGFX& lcd, const PvFrameV4& f){
   // --- lokale Helfer ---
   auto drawHBar = [&](int x, int y, int w, int h, int32_t valueW, int32_t maxW, uint16_t colFill){
     if (maxW <= 0) maxW = 1;
@@ -272,7 +272,7 @@ static inline void drawPage2Content(LGFX& tft, const PvFrameV4& f){
 }
 
 // Seite 3: Uhrzeit + Datum
-static inline void drawPage3Content(LGFX& tft, const PvFrameV4&){
+static inline void drawPage3Content(LGFX& lcd, const PvFrameV4&){
   // lokale Lambdas
   auto nowHHMM = []() -> String {
     time_t n; struct tm ti; time(&n); localtime_r(&n,&ti);
@@ -304,7 +304,7 @@ static inline void drawPage3Content(LGFX& tft, const PvFrameV4&){
 }
 
 // Seite 5: Drei Zeiger-Gauges (PV, Batterie, Grid)
-static void drawPage5Content(LGFX& tft, const PvFrameV4& f){
+static void drawPage5Content(LGFX& lcd, const PvFrameV4& f){
   // ---------- Geometrie ----------
   const int gaugesY = 42;               // Oberkante der 3 Meter
   const int gW = 100, gH = 160;         // Größe pro Meter
@@ -386,7 +386,7 @@ static void drawPage5Content(LGFX& tft, const PvFrameV4& f){
     if (vMax == vMin) vMax = vMin + 1.0f;
 
     // Sprite pro Gauge – simpel & flackerfrei (wird jedes Mal erstellt)
-    TFT_eSprite spr(&tft);
+    LGFX_Sprite spr(&lcd);
     spr.setColorDepth(16);
     spr.createSprite(w, h);
     spr.fillSprite(TFT_BLACK);
@@ -622,7 +622,7 @@ static void drawPage5Content(LGFX& tft, const PvFrameV4& f){
 }
 
 // Seite 6: 30-Tage oder Monats-Balken (Statistik)
-static void drawPage6Content(LGFX& tft, const PvFrameV4& , int kind) {
+static void drawPage6Content(LGFX& lcd, const PvFrameV4& , int kind) {
   auto ymdFromTime = [](time_t tt)->uint32_t {
     struct tm tmv; localtime_r(&tt, &tmv);
     return (uint32_t)((tmv.tm_year+1900)*10000 + (tmv.tm_mon+1)*100 + tmv.tm_mday);
@@ -861,7 +861,7 @@ static void drawPage6Content(LGFX& tft, const PvFrameV4& , int kind) {
 static constexpr int PV_MAX_PAGES = 5;
 static inline int pvMaxPages(){ return PV_MAX_PAGES; }
 
-static inline void drawPvPage(LGFX& tft, const PvFrameV4& f, int page){
+static inline void drawPvPage(LGFX& lcd, const PvFrameV4& f, int page){
   // lokales clearContent (gekapselt)
   auto clearContentArea = [&](LGFX& t){
     const int y = headerLineY + 1;
@@ -869,17 +869,17 @@ static inline void drawPvPage(LGFX& tft, const PvFrameV4& f, int page){
   };
 
   // 1) Header
-  drawStatusHeader(tft, f);
+  drawStatusHeader(lcd, f);
   // 2) Inhaltsbereich freiräumen
-  clearContentArea(tft);
+  clearContentArea(lcd);
   // 3) Seite rendern (nur Inhalt)
   switch(page){
     default:
-    case 0: drawPage5Content(tft,f); break; 
-    case 1: drawPage2Content(tft,f); break; 
-    case 2: drawPage6Content(tft,f,tagesAnzeige); break; 
-    case 3: drawPage6Content(tft,f,monatsAnzeige); break; 
-    case 4: drawPage3Content(tft,f); break; 
+    case 0: drawPage5Content(lcd,f); break;
+    case 1: drawPage2Content(lcd,f); break;
+    case 2: drawPage6Content(lcd,f,tagesAnzeige); break;
+    case 3: drawPage6Content(lcd,f,monatsAnzeige); break;
+    case 4: drawPage3Content(lcd,f); break;
   }
 }
 
@@ -1078,13 +1078,13 @@ static void handleTouchSwipe(){
       if (pageIndex > 0) pageIndex--;
     }
 
-    if (pageIndex != oldPage) drawPvPage(tft, lastF, pageIndex);  // ganze Seite neu zeichnen
+    if (pageIndex != oldPage) drawPvPage(lcd, lastF, pageIndex);  // ganze Seite neu zeichnen
   }
 }
 
 static void drawIfFrame(){
   if (!haveFrame) return;
-  drawPvPage(tft, lastF, pageIndex);
+  drawPvPage(lcd, lastF, pageIndex);
 }
 
 // ================= POLLER: Modbus & Register =================
