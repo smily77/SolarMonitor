@@ -101,6 +101,7 @@ struct MonthAgg { float gen_kWh, load_kWh, impT1_kWh, impT2_kWh, exp_kWh; };
 #include <AsyncUDP.h>
 #include <time.h>
 #include <Preferences.h>
+#include <Streaming.h>
 #include <Credentials.h>
 #include <SPI.h>
 #include <XPT2046_Touchscreen.h>
@@ -1137,26 +1138,26 @@ const uint16_t REG_VA=37101, REG_VB=37103, REG_VC=37105, REG_IA=37107, REG_IB=37
   static inline uint32_t mkU32_BE(uint16_t hi, uint16_t lo){ return (((uint32_t)hi<<16)|lo); }
   static inline bool cbFinal(bool success){ if(success) gotAny=true; else hadError=true; if(pending>0) pending--; return true; }
 
-  // ETA-Berechnung: Zeit bis Batterie 20% erreicht (oder lädt)
+  // ETA-Berechnung: Zeit bis Batterie auf 20% GELADEN ist
   static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int32_t gridW) {
     const float TARGET_SOC = 20.0f;
-    const float BATTERY_CAPACITY_WH = 5000.0f; // 5 kWh Standard-Batterie (kann angepasst werden)
+    const float BATTERY_CAPACITY_WH = 5000.0f; // 5 kWh Annahme (anpassbar)
 
-    // Wenn SOC bereits unter oder bei 20%, keine ETA
-    if (socPercent <= TARGET_SOC + 0.5f) return -1;
+    // Nur wenn SOC unter 20% und Batterie lädt
+    if (socPercent >= TARGET_SOC) return -1;
 
-    // Wenn Batterie lädt (battW > 0), keine ETA für Entladung
-    if (battW >= -50) return -1; // Deadband 50W
+    // Batterie muss laden (battW > 0 = Charge)
+    if (battW <= 50) return -1; // Deadband 50W, muss positiv sein zum Laden
 
-    // Entladeleistung (negativ -> positiv machen)
-    float dischargePowerW = -(float)battW;
-    if (dischargePowerW < 50.0f) return -1; // Zu geringe Entladung
+    // Ladeleistung in Watt
+    float chargePowerW = (float)battW;
+    if (chargePowerW < 50.0f) return -1; // Zu geringe Ladung
 
-    // Energie die noch entladen werden muss bis 20%
-    float energyToDischargeWh = ((socPercent - TARGET_SOC) / 100.0f) * BATTERY_CAPACITY_WH;
+    // Energie die noch geladen werden muss bis 20%
+    float energyToChargeWh = ((TARGET_SOC - socPercent) / 100.0f) * BATTERY_CAPACITY_WH;
 
     // Zeit in Stunden
-    float hoursToTarget = energyToDischargeWh / dischargePowerW;
+    float hoursToTarget = energyToChargeWh / chargePowerW;
 
     // In Sekunden umrechnen
     int32_t secondsToTarget = (int32_t)(hoursToTarget * 3600.0f);
