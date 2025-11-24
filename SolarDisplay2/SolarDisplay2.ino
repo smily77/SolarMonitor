@@ -1138,34 +1138,71 @@ const uint16_t REG_VA=37101, REG_VB=37103, REG_VC=37105, REG_IA=37107, REG_IB=37
   static inline uint32_t mkU32_BE(uint16_t hi, uint16_t lo){ return (((uint32_t)hi<<16)|lo); }
   static inline bool cbFinal(bool success){ if(success) gotAny=true; else hadError=true; if(pending>0) pending--; return true; }
 
+  // ETA-Tracking Variablen
+  static int lastSOCPercent = -1;      // Letzter aufgerundeter SOC (in ganzen %)
+  static uint32_t lastSOCTimestamp = 0; // Zeitpunkt der letzten SOC-Änderung (millis)
+  static uint32_t timePerPercent = 0;   // Zeit für letztes 1% in Millisekunden
+
   // ETA-Berechnung: Zeit bis Batterie auf 20% GELADEN ist
+  // Basiert auf der Ladedauer des letzten Prozent-Schritts
   static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int32_t gridW) {
     const float TARGET_SOC = 20.0f;
-    const float BATTERY_CAPACITY_WH = 5000.0f; // 5 kWh Annahme (anpassbar)
 
-    // Nur wenn SOC unter 20% und Batterie lädt
-    if (socPercent >= TARGET_SOC) return -1;
+    int currentSOC = (int)(socPercent + 0.5f); // Aufrunden
+
+    // Nur wenn SOC unter 20%
+    if (socPercent >= TARGET_SOC) {
+      // Reset tracking wenn über 20%
+      lastSOCPercent = -1;
+      timePerPercent = 0;
+      return -1;
+    }
 
     // Batterie muss laden (battW > 0 = Charge)
-    if (battW <= 50) return -1; // Deadband 50W, muss positiv sein zum Laden
+    if (battW <= 50) { // Deadband 50W
+      // Reset wenn nicht mehr lädt
+      lastSOCPercent = -1;
+      timePerPercent = 0;
+      return -1;
+    }
 
-    // Ladeleistung in Watt
-    float chargePowerW = (float)battW;
-    if (chargePowerW < 50.0f) return -1; // Zu geringe Ladung
+    // Initialisierung beim ersten Aufruf im Ladevorgang
+    if (lastSOCPercent == -1) {
+      lastSOCPercent = currentSOC;
+      lastSOCTimestamp = millis();
+      return -1; // Noch keine ETA, warten auf ersten 1% Anstieg
+    }
 
-    // Energie die noch geladen werden muss bis 20%
-    float energyToChargeWh = ((TARGET_SOC - socPercent) / 100.0f) * BATTERY_CAPACITY_WH;
+    // Hat sich SOC um mindestens 1% erhöht?
+    if (currentSOC > lastSOCPercent) {
+      uint32_t now = millis();
+      uint32_t timeDiff = now - lastSOCTimestamp;
 
-    // Zeit in Stunden
-    float hoursToTarget = energyToChargeWh / chargePowerW;
+      // Berechne Zeit pro Prozent (nur wenn sinnvoller Zeitunterschied)
+      if (timeDiff > 1000 && timeDiff < 3600000) { // zwischen 1 Sekunde und 1 Stunde
+        int percentIncrease = currentSOC - lastSOCPercent;
+        timePerPercent = timeDiff / percentIncrease; // Zeit pro 1%
+      }
 
-    // In Sekunden umrechnen
-    int32_t secondsToTarget = (int32_t)(hoursToTarget * 3600.0f);
+      // Update tracking
+      lastSOCPercent = currentSOC;
+      lastSOCTimestamp = now;
+    }
 
-    // Plausibilitätscheck: nicht mehr als 24 Stunden
-    if (secondsToTarget < 0 || secondsToTarget > 86400) return -1;
+    // Wenn wir Zeit pro Prozent haben, berechne ETA
+    if (timePerPercent > 0 && timePerPercent < 3600000) { // max 1h pro Prozent
+      float percentToGo = TARGET_SOC - socPercent;
+      if (percentToGo > 0) {
+        int32_t secondsToTarget = (int32_t)((percentToGo * timePerPercent) / 1000);
 
-    return secondsToTarget;
+        // Plausibilitätscheck: nicht mehr als 24 Stunden
+        if (secondsToTarget > 0 && secondsToTarget <= 86400) {
+          return secondsToTarget;
+        }
+      }
+    }
+
+    return -1; // Noch keine valide ETA
   }
 
   // Snapshot für atomare Messbilder
