@@ -101,7 +101,6 @@ struct MonthAgg { float gen_kWh, load_kWh, impT1_kWh, impT2_kWh, exp_kWh; };
 #include <AsyncUDP.h>
 #include <time.h>
 #include <Preferences.h>
-#include <Streaming.h>
 #include <Credentials.h>
 #include <SPI.h>
 #include <XPT2046_Touchscreen.h>
@@ -1138,6 +1137,36 @@ const uint16_t REG_VA=37101, REG_VB=37103, REG_VC=37105, REG_IA=37107, REG_IB=37
   static inline uint32_t mkU32_BE(uint16_t hi, uint16_t lo){ return (((uint32_t)hi<<16)|lo); }
   static inline bool cbFinal(bool success){ if(success) gotAny=true; else hadError=true; if(pending>0) pending--; return true; }
 
+  // ETA-Berechnung: Zeit bis Batterie 20% erreicht (oder lädt)
+  static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int32_t gridW) {
+    const float TARGET_SOC = 20.0f;
+    const float BATTERY_CAPACITY_WH = 5000.0f; // 5 kWh Standard-Batterie (kann angepasst werden)
+
+    // Wenn SOC bereits unter oder bei 20%, keine ETA
+    if (socPercent <= TARGET_SOC + 0.5f) return -1;
+
+    // Wenn Batterie lädt (battW > 0), keine ETA für Entladung
+    if (battW >= -50) return -1; // Deadband 50W
+
+    // Entladeleistung (negativ -> positiv machen)
+    float dischargePowerW = -(float)battW;
+    if (dischargePowerW < 50.0f) return -1; // Zu geringe Entladung
+
+    // Energie die noch entladen werden muss bis 20%
+    float energyToDischargeWh = ((socPercent - TARGET_SOC) / 100.0f) * BATTERY_CAPACITY_WH;
+
+    // Zeit in Stunden
+    float hoursToTarget = energyToDischargeWh / dischargePowerW;
+
+    // In Sekunden umrechnen
+    int32_t secondsToTarget = (int32_t)(hoursToTarget * 3600.0f);
+
+    // Plausibilitätscheck: nicht mehr als 24 Stunden
+    if (secondsToTarget < 0 || secondsToTarget > 86400) return -1;
+
+    return secondsToTarget;
+  }
+
   // Snapshot für atomare Messbilder
   struct Snapshot {
     int32_t pvW=0, gridW=0, battW=0;
@@ -1156,26 +1185,11 @@ const uint16_t REG_VA=37101, REG_VB=37103, REG_VC=37105, REG_IA=37107, REG_IB=37
   static Snapshot snapStage, snapLive;
 
   enum : uint32_t {
-    RM_PV      = 1u<<0,
-    RM_GRID    = 1u<<1,
-    RM_BATT    = 1u<<2,
-    RM_TEMP    = 1u<<3,
-    RM_PVTODAY = 1u<<4,
-    RM_EXP     = 1u<<5,
-    RM_IMP     = 1u<<6,
-    RM_SOC     = 1u<<7,
-    RM_PV1V    = 1u<<8,
-    RM_PV1A    = 1u<<9,
-    RM_PV2V    = 1u<<10,
-    RM_PV2A    = 1u<<11,
-    RM_VA      = 1u<<12,
-    RM_VB      = 1u<<13,
-    RM_VC      = 1u<<14,
-    RM_IA      = 1u<<15,
-    RM_IB      = 1u<<16,
-    RM_IC      = 1u<<17,
+    RM_PV=1u<<0, RM_GRID=1u<<1, RM_BATT=1u<<2, RM_TEMP=1u<<3, RM_PVTODAY=1u<<4, RM_EXP=1u<<5, RM_IMP=1u<<6, RM_SOC=1u<<7,
+    RM_PV1V=1u<<8, RM_PV1A=1u<<9, RM_PV2V=1u<<10, RM_PV2A=1u<<11, RM_VA=1u<<12, RM_VB=1u<<13, RM_VC=1u<<14,
+    RM_IA=1u<<15, RM_IB=1u<<16, RM_IC=1u<<17
   };
-  static const uint32_t RM_REQUIRED = RM_PV | RM_GRID | RM_BATT; // für konsistente Integration
+  static const uint32_t RM_REQUIRED = RM_PV | RM_GRID | RM_BATT;
 
   static void startPoll(){
     if (pending>0 || !mb.isConnected(inverterIP)) return;
@@ -1317,6 +1331,10 @@ const uint16_t REG_VA=37101, REG_VB=37103, REG_VC=37105, REG_IA=37107, REG_IB=37
     lastF.gridExpToday = dayAgg.exp_kWh;
     lastF.gridImpToday = dayAgg.impT1_kWh + dayAgg.impT2_kWh;
 
+    // ETA bis 20% berechnen
+    float socPercent = snapLive.socx10 / 10.0f;
+    lastF.eta20s = calculateETA20(socPercent, snapLive.battW, snapLive.pvW, snapLive.gridW);
+
     lastF.crc = 0;
     lastF.crc = crc16_modbus((const uint8_t*)&lastF, sizeof(PvFrameV4)-2);
 
@@ -1372,8 +1390,6 @@ static void statsSendDiscover(){
 }
 
 #ifdef ROLE_POLLER
-static inline int daysInMonthInline(int y,int m){ return daysInMonth(y,m); }
-
 static void statsPollerStart(){
   // Multicast: Discover empfangen, Offer senden
   if (!udpStatsCtrl.listenMulticast(STATS_MCAST_GRP, STATS_MCAST_PORT)){
@@ -1407,7 +1423,7 @@ static void statsPollerStart(){
         PayloadDay pd{ (uint16_t)y,(uint16_t)m,(uint16_t)d, a.gen_kWh, a.load_kWh, a.impT1_kWh, a.impT2_kWh, a.exp_kWh };
         statsSendTo(p.remoteIP(), STATS_SERVER_PORT, STATS_DAY, ++statsSeq, &pd, sizeof(pd));
         // nächster Tag
-        int dim=daysInMonthInline(y,m); d++; if (d>dim){ d=1; m++; if (m>12){ m=1; y++; } }
+        int dim=daysInMonth(y,m); d++; if (d>dim){ d=1; m++; if (m>12){ m=1; y++; } }
         delay(2);
       }
 
