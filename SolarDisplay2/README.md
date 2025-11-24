@@ -56,23 +56,41 @@ const char* ssid = "DEIN_WIFI";
 const char* password = "DEIN_PASSWORT";
 ```
 
-## ETA-Berechnung
+## ETA-Berechnung (Adaptive Ladezeit-Vorhersage)
 
 Die **ETA (Estimated Time of Arrival)** zeigt an, wann die Batterie voraussichtlich 20% erreichen wird:
 
-- **Funktionsweise**: Berechnet die Zeit basierend auf der aktuellen Entladeleistung
-- **Annahmen**: Standard-Batteriekapazität von 5 kWh (kann im Code angepasst werden: Zeile 1144)
-- **Aktivierung**: Nur bei Entladung (battW < -50W) und SOC > 20%
-- **Anzeige**: Zeit im Format HH:MM oder "--:--" wenn nicht anwendbar
-- **Plausibilitätscheck**: Maximum 24 Stunden
+### Funktionsweise
 
-### Anpassung der Batteriekapazität
+Die ETA-Berechnung ist **adaptiv** und benötigt **keine Batteriekapazität**:
 
-Falls deine Batterie eine andere Kapazität hat, ändere in `SolarDisplay2.ino` Zeile 1144:
+1. **Aktivierung**: Nur bei SOC < 20% und aktivem Laden (battW > 50W)
+2. **Tracking**: Bei jedem 1%-Anstieg wird die Zeit gemessen
+3. **Berechnung**: `ETA = (20% - aktueller SOC) × Zeit_pro_Prozent`
+4. **Anzeige**: Zeit im Format HH:MM oder "--:--" wenn nicht verfügbar
 
-```cpp
-const float BATTERY_CAPACITY_WH = 5000.0f; // Deine Kapazität in Wh (z.B. 10000.0f für 10 kWh)
+### Vorteile dieser Methode
+
+- ✅ **Keine Batteriekapazität nötig**: Funktioniert mit jeder Batteriegröße
+- ✅ **Adaptiv**: Passt sich automatisch der sich ändernden Ladeleistung an
+- ✅ **Präzise bei Sonnenaufgang**: Berücksichtigt steigende PV-Leistung optimal
+- ✅ **Einfach**: Nutzt nur die tatsächlich gemessene Ladegeschwindigkeit
+
+### Beispiel
+
 ```
+Aktueller SOC: 15%
+Letzter 1%-Schritt: 3 Minuten (180 Sekunden)
+Noch zu laden: 5%
+ETA = 5 × 3 Min = 15 Minuten
+Anzeige: 08:15 (wenn aktuelle Zeit 08:00)
+```
+
+### Plausibilitätschecks
+
+- Zeitdifferenz pro %: 1 Sekunde bis 1 Stunde
+- Zeit pro %: maximal 1 Stunde
+- Gesamt-ETA: maximal 24 Stunden
 
 ## Code-Optimierungen
 
