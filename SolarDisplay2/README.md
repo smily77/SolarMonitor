@@ -56,6 +56,29 @@ const char* ssid = "DEIN_WIFI";
 const char* password = "DEIN_PASSWORT";
 ```
 
-## Bekannte Probleme
+## ETA-Berechnung
 
-- **ETA-Anzeige (Zeit bis 20% Batterie)**: Aktuell noch nicht korrekt implementiert (zeigt --:--)
+Die **ETA (Estimated Time of Arrival)** zeigt an, wann die Batterie voraussichtlich 20% erreichen wird:
+
+- **Funktionsweise**: Berechnet die Zeit basierend auf der aktuellen Entladeleistung
+- **Annahmen**: Standard-Batteriekapazität von 5 kWh (kann im Code angepasst werden: Zeile 1144)
+- **Aktivierung**: Nur bei Entladung (battW < -50W) und SOC > 20%
+- **Anzeige**: Zeit im Format HH:MM oder "--:--" wenn nicht anwendbar
+- **Plausibilitätscheck**: Maximum 24 Stunden
+
+### Anpassung der Batteriekapazität
+
+Falls deine Batterie eine andere Kapazität hat, ändere in `SolarDisplay2.ino` Zeile 1144:
+
+```cpp
+const float BATTERY_CAPACITY_WH = 5000.0f; // Deine Kapazität in Wh (z.B. 10000.0f für 10 kWh)
+```
+
+## Code-Optimierungen
+
+Gegenüber dem Original wurden folgende Vereinfachungen vorgenommen:
+
+- Entfernung redundanter Funktionen (daysInMonthInline)
+- Entfernung ungenutzter Bibliotheken (Streaming.h)
+- Kompaktere Enum-Definitionen
+- Bessere Code-Organisation
