@@ -1514,6 +1514,7 @@ void setup(){
 
   // LovyanGFX Init (Display + Touch werden in CYD_Display_Config.h konfiguriert)
   lcd.init();
+  lcd.setRotation(1);  // 1 = Landscape (320x240)
   lcd.fillScreen(TFT_BLACK);
 
   WiFi.mode(WIFI_STA);
