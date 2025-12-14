@@ -1087,6 +1087,88 @@ static void drawIfFrame(){
   drawPvPage(lcd, lastF, pageIndex);
 }
 
+// ================= ETA-Berechnung (lokal auf POLLER und CLIENT) =================
+// ETA-Tracking Variablen
+static int lastSOCPercent = -1;      // Letzter aufgerundeter SOC (in ganzen %)
+static uint32_t lastSOCTimestamp = 0; // Zeitpunkt der letzten SOC-Änderung (millis)
+static uint32_t timePerPercent = 0;   // Zeit für letztes 1% in Millisekunden
+
+// ETA-Berechnung: Zeit bis Batterie auf 20% GELADEN ist
+// Basiert auf der Ladedauer des letzten Prozent-Schritts
+static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int32_t gridW) {
+  const float TARGET_SOC = 20.0f;
+
+  int currentSOC = (int)(socPercent + 0.5f); // Aufrunden
+
+  // DEBUG
+  static uint32_t lastDebugMs = 0;
+  if (millis() - lastDebugMs > 10000) { // Alle 10 Sekunden
+    Serial.printf("[ETA] SOC=%.1f%% battW=%d lastSOC=%d timePerPct=%lums\n",
+                  socPercent, battW, lastSOCPercent, timePerPercent);
+    lastDebugMs = millis();
+  }
+
+  // Nur wenn SOC unter 20%
+  if (socPercent >= TARGET_SOC) {
+    // Reset tracking wenn über 20%
+    lastSOCPercent = -1;
+    timePerPercent = 0;
+    return -1;
+  }
+
+  // Batterie muss laden (battW > 0 = Charge)
+  if (battW <= 50) { // Deadband 50W
+    // Reset wenn nicht mehr lädt
+    if (lastSOCPercent != -1) {
+      Serial.printf("[ETA] Reset: battW=%d zu niedrig\n", battW);
+    }
+    lastSOCPercent = -1;
+    timePerPercent = 0;
+    return -1;
+  }
+
+  // Initialisierung beim ersten Aufruf im Ladevorgang
+  if (lastSOCPercent == -1) {
+    lastSOCPercent = currentSOC;
+    lastSOCTimestamp = millis();
+    Serial.printf("[ETA] Init tracking: SOC=%d%%\n", currentSOC);
+    return -1; // Noch keine ETA, warten auf ersten 1% Anstieg
+  }
+
+  // Hat sich SOC um mindestens 1% erhöht?
+  if (currentSOC > lastSOCPercent) {
+    uint32_t now = millis();
+    uint32_t timeDiff = now - lastSOCTimestamp;
+
+    // Berechne Zeit pro Prozent (nur wenn sinnvoller Zeitunterschied)
+    if (timeDiff > 1000 && timeDiff < 3600000) { // zwischen 1 Sekunde und 1 Stunde
+      int percentIncrease = currentSOC - lastSOCPercent;
+      timePerPercent = timeDiff / percentIncrease; // Zeit pro 1%
+      Serial.printf("[ETA] +%d%% in %lums → %lums/%%\n",
+                    percentIncrease, timeDiff, timePerPercent);
+    }
+
+    // Update tracking
+    lastSOCPercent = currentSOC;
+    lastSOCTimestamp = now;
+  }
+
+  // Wenn wir Zeit pro Prozent haben, berechne ETA
+  if (timePerPercent > 0 && timePerPercent < 3600000) { // max 1h pro Prozent
+    float percentToGo = TARGET_SOC - socPercent;
+    if (percentToGo > 0) {
+      int32_t secondsToTarget = (int32_t)((percentToGo * timePerPercent) / 1000);
+
+      // Plausibilitätscheck: nicht mehr als 24 Stunden
+      if (secondsToTarget > 0 && secondsToTarget <= 86400) {
+        return secondsToTarget;
+      }
+    }
+  }
+
+  return -1; // Noch keine valide ETA
+}
+
 // ================= POLLER: Modbus & Register =================
 #ifdef ROLE_POLLER
   #include <ModbusIP_ESP8266.h>
@@ -1115,73 +1197,6 @@ const uint16_t REG_VA=37101, REG_VB=37103, REG_VC=37105, REG_IA=37107, REG_IB=37
   inline int32_t mk32_BE(uint16_t hi, uint16_t lo){ return (int32_t)(((uint32_t)hi<<16)|lo); }
   static inline uint32_t mkU32_BE(uint16_t hi, uint16_t lo){ return (((uint32_t)hi<<16)|lo); }
   static inline bool cbFinal(bool success){ if(success) gotAny=true; else hadError=true; if(pending>0) pending--; return true; }
-
-  // ETA-Tracking Variablen
-  static int lastSOCPercent = -1;      // Letzter aufgerundeter SOC (in ganzen %)
-  static uint32_t lastSOCTimestamp = 0; // Zeitpunkt der letzten SOC-Änderung (millis)
-  static uint32_t timePerPercent = 0;   // Zeit für letztes 1% in Millisekunden
-
-  // ETA-Berechnung: Zeit bis Batterie auf 20% GELADEN ist
-  // Basiert auf der Ladedauer des letzten Prozent-Schritts
-  static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int32_t gridW) {
-    const float TARGET_SOC = 20.0f;
-
-    int currentSOC = (int)(socPercent + 0.5f); // Aufrunden
-
-    // Nur wenn SOC unter 20%
-    if (socPercent >= TARGET_SOC) {
-      // Reset tracking wenn über 20%
-      lastSOCPercent = -1;
-      timePerPercent = 0;
-      return -1;
-    }
-
-    // Batterie muss laden (battW > 0 = Charge)
-    if (battW <= 50) { // Deadband 50W
-      // Reset wenn nicht mehr lädt
-      lastSOCPercent = -1;
-      timePerPercent = 0;
-      return -1;
-    }
-
-    // Initialisierung beim ersten Aufruf im Ladevorgang
-    if (lastSOCPercent == -1) {
-      lastSOCPercent = currentSOC;
-      lastSOCTimestamp = millis();
-      return -1; // Noch keine ETA, warten auf ersten 1% Anstieg
-    }
-
-    // Hat sich SOC um mindestens 1% erhöht?
-    if (currentSOC > lastSOCPercent) {
-      uint32_t now = millis();
-      uint32_t timeDiff = now - lastSOCTimestamp;
-
-      // Berechne Zeit pro Prozent (nur wenn sinnvoller Zeitunterschied)
-      if (timeDiff > 1000 && timeDiff < 3600000) { // zwischen 1 Sekunde und 1 Stunde
-        int percentIncrease = currentSOC - lastSOCPercent;
-        timePerPercent = timeDiff / percentIncrease; // Zeit pro 1%
-      }
-
-      // Update tracking
-      lastSOCPercent = currentSOC;
-      lastSOCTimestamp = now;
-    }
-
-    // Wenn wir Zeit pro Prozent haben, berechne ETA
-    if (timePerPercent > 0 && timePerPercent < 3600000) { // max 1h pro Prozent
-      float percentToGo = TARGET_SOC - socPercent;
-      if (percentToGo > 0) {
-        int32_t secondsToTarget = (int32_t)((percentToGo * timePerPercent) / 1000);
-
-        // Plausibilitätscheck: nicht mehr als 24 Stunden
-        if (secondsToTarget > 0 && secondsToTarget <= 86400) {
-          return secondsToTarget;
-        }
-      }
-    }
-
-    return -1; // Noch keine valide ETA
-  }
 
   // Snapshot für atomare Messbilder
   struct Snapshot {
@@ -1379,6 +1394,10 @@ static void beginListenFrames(){
 
     lastSeq = f->seq; lastRxMs = millis();
     lastF = *f; haveFrame=true;
+
+    // ETA lokal berechnen (unabhängig vom Poller)
+    float socPercent = lastF.socx10 / 10.0f;
+    lastF.eta20s = calculateETA20(socPercent, lastF.battW, lastF.pvW, lastF.gridW);
 
     // Lokal integrieren, damit Anzeige auf Clients Werte hat
     integrateTick(lastF.pvW, lastF.gridW, lastF.battW);
