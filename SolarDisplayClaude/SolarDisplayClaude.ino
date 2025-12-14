@@ -1095,10 +1095,10 @@ static uint32_t timePerPercent = 0;   // Zeit für letztes 1% in Millisekunden
 
 // ETA-Berechnung: Zeit bis Batterie auf 20% GELADEN ist
 // Basiert auf der Ladedauer des letzten Prozent-Schritts
-// WICHTIG: Tracking läuft IMMER (bei SOC > 5% und Laden), ETA wird nur angezeigt wenn < 20%
+// Tracking läuft nur wenn SOC <= 20% und Batterie lädt
 static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int32_t gridW) {
   const float TARGET_SOC = 20.0f;
-  const float MIN_SOC = 5.0f;  // Mindest-SOC für zuverlässiges Tracking
+  const float MIN_SOC = 5.0f;  // Sicherheit: Batterie geht nie unter 5%
 
   int currentSOC = (int)(socPercent + 0.5f); // Aufrunden
 
@@ -1110,7 +1110,17 @@ static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int3
     lastDebugMs = millis();
   }
 
-  // SOC muss über Minimum sein (zu niedrige Werte sind unzuverlässig)
+  // Tracking nur wenn SOC <= 20%
+  if (socPercent > TARGET_SOC) {
+    if (lastSOCPercent != -1) {
+      Serial.printf("[ETA] Reset: SOC %.1f%% > %.1f%%\n", socPercent, TARGET_SOC);
+    }
+    lastSOCPercent = -1;
+    timePerPercent = 0;
+    return -1;
+  }
+
+  // Sicherheit: SOC muss über Minimum sein (sollte nie vorkommen)
   if (socPercent < MIN_SOC) {
     if (lastSOCPercent != -1) {
       Serial.printf("[ETA] Reset: SOC %.1f%% < %.1f%%\n", socPercent, MIN_SOC);
@@ -1155,11 +1165,6 @@ static int32_t calculateETA20(float socPercent, int32_t battW, int32_t pvW, int3
     // Update tracking
     lastSOCPercent = currentSOC;
     lastSOCTimestamp = now;
-  }
-
-  // ETA nur ANZEIGEN wenn SOC < 20% (Tracking läuft aber immer!)
-  if (socPercent >= TARGET_SOC) {
-    return -1; // Keine Anzeige, aber Tracking läuft weiter
   }
 
   // Wenn wir Zeit pro Prozent haben, berechne ETA
